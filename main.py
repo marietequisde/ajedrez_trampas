@@ -1,108 +1,103 @@
+import customtkinter as ctk
+import threading
+from PIL import Image
+import io
 from selenium import webdriver
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from webdriver_manager.chrome import ChromeDriverManager
-import time
+
+# Importamos tus archivos
 import sunfish
+from scrapper import scrape_chess_board, matriz_a_fen
 
-url_ajedrez = "https://www.chesskid.com/es/play/computer"
+class ChessScraperApp(ctk.CTk):
+    def __init__(self):
+        super().__init__()
 
-def main():
-    print("iniciando navegador...")
-    driver = iniciar_navegador(url_ajedrez)
-    
-    print("\n--- CONFIGURACIÓN LISTA ---")
-    input("1. Entra a la partida.\n2. Asegúrate de que el tablero sea visible.\n3. Presiona ENTER aquí para empezar a pedir jugadas.")
+        self.title("Chess Scraper")
+        self.geometry("1100x700")
+        self.driver = None
 
-    while True:
-        print("\n" + "-"*30)
-        comando = input("Presiona ENTER para analizar (o escribe 'salir'): ").lower()
-        if comando == 'salir':
-            break
+        # --- DISEÑO ---
+        # Panel Izquierdo: Consola y Resultado
+        self.left_panel = ctk.CTkFrame(self, width=400)
+        self.left_panel.pack(side="left", fill="both", padx=10, pady=10)
 
-        # 1. Scrapear tablero
-        tablero = scrape_chess_board(driver)
+        self.label_titulo = ctk.CTkLabel(self.left_panel, text="CONTROL PANEL", font=("Roboto", 20, "bold"))
+        self.label_titulo.pack(pady=20)
+
+        self.console = ctk.CTkTextbox(self.left_panel, height=200, font=("Consolas", 12))
+        self.console.pack(fill="x", padx=10, pady=10)
+
+        self.label_move = ctk.CTkLabel(self.left_panel, text="-- --", font=("Roboto", 60, "bold"), text_color="#f1c40f")
+        self.label_move.pack(pady=30)
+
+        self.btn_start = ctk.CTkButton(self.left_panel, text="1. ABRIR NAVEGADOR", command=self.start_browser)
+        self.btn_start.pack(pady=5)
+
+        self.btn_read = ctk.CTkButton(self.left_panel, text="2. LEER Y ANALIZAR", command=self.analizar_ahora, fg_color="#27ae60", height=50)
+        self.btn_read.pack(pady=10)
+
+        # Panel Derecho: Visor del Tablero (El "Espejo")
+        self.right_panel = ctk.CTkFrame(self)
+        self.right_panel.pack(side="right", fill="both", expand=True, padx=10, pady=10)
         
-        # 2. Mostrar tablero en consola
-        for row in tablero:
-            print(" ".join(row))
+        self.board_display = ctk.CTkLabel(self.right_panel, text="El tablero aparecerá aquí\nal darle a 'LEER'", font=("Roboto", 16))
+        self.board_display.pack(fill="both", expand=True)
 
-        # 3. Calcular jugada con Sunfish
+    def log(self, text):
+        self.console.insert("end", f"\n> {text}")
+        self.console.see("end")
+
+    def start_browser(self):
+        threading.Thread(target=self.init_driver, daemon=True).start()
+
+    def init_driver(self):
+        self.log("Iniciando Chrome...")
+        options = webdriver.ChromeOptions()
+        options.add_experimental_option("detach", True)
+        self.driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
+        self.driver.get("https://www.chesskid.com/es/play/computer")
+        self.log("Navegador listo.")
+
+    def analizar_ahora(self):
+        if not self.driver:
+            self.log("¡Error! Abre el navegador primero.")
+            return
+
         try:
-            # Asumimos que juegas con blancas ('w'). Cambia a False si eres negras.
-            jugada = pensar_jugada_sunfish(tablero, es_blancas=True)
-            print(f"\n>>> SUGERENCIA DE SUNFISH: {jugada}")
+            # 1. CAPTURA VISUAL (Solo en este momento)
+            # Buscamos el elemento del tablero en el HTML
+            board_elem = self.driver.find_element(By.CSS_SELECTOR, "chess-board, .board, #board")
+            screenshot = board_elem.screenshot_as_png
+            img = Image.open(io.BytesIO(screenshot))
+            
+            # Ajustamos la imagen al tamaño del panel derecho
+            img_ctk = ctk.CTkImage(light_image=img, dark_image=img, size=(550, 550))
+            self.board_display.configure(image=img_ctk, text="")
+
+            # 2. SCRAPING DE DATOS
+            self.log("Leyendo piezas...")
+            tablero = scrape_chess_board(self.driver)
+            fen = matriz_a_fen(tablero, turno="w")
+
+            # 3. CÁLCULO CON MOTOR
+            self.log("Calculando mejor jugada...")
+            searcher = sunfish.Searcher()
+            pos = sunfish.parseFEN(fen)
+            
+            # Buscamos el mejor movimiento (2 segundos de análisis)
+            move, _ = searcher.search(pos, secs=2)
+            movimiento_str = sunfish.render(move)
+
+            # 4. MOSTRAR RESULTADO
+            self.label_move.configure(text=movimiento_str.upper())
+            self.log(f"Resultado: {movimiento_str}")
+
         except Exception as e:
-            print(f"Error al calcular jugada: {e}")
-
-    driver.quit()
-
-def iniciar_navegador(url):
-    options = webdriver.ChromeOptions()
-    options.add_experimental_option("detach", True)
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    driver.get(url)
-    return driver
-
-def scrape_chess_board(driver):
-    # IMPORTANTE: Usamos ".." para celdas vacías para que la función FEN sea precisa
-    board = [[".." for _ in range(8)] for _ in range(8)]
-    try:
-        pieces = driver.find_elements(By.CSS_SELECTOR, ".piece")
-        for piece in pieces:
-            classes = piece.get_attribute("class")
-            parts = classes.split(' ')
-            
-            # Extraer tipo (ej: 'wp') y posición (ej: 'square-81')
-            p_type = [p for p in parts if len(p) == 2 and not p.isdigit()][0]
-            pos_class = [p for p in parts if 'square-' in p][0]
-            
-            pos_num = int(pos_class.replace('square-', ''))
-            col = (pos_num // 10) - 1
-            row = 8 - (pos_num % 10)
-            
-            if 0 <= col < 8 and 0 <= row < 8:
-                board[row][col] = p_type
-        return board
-    except Exception as e:
-        print(f"Error leyendo piezas: {e}")
-        return board
-
-def matriz_a_fen(matriz, turno="w"):
-    fen_rows = []
-    mapeo = {'p': 'p', 'n': 'n', 'b': 'b', 'r': 'r', 'q': 'q', 'k': 'k'}
-    
-    for row in matriz:
-        empty = 0
-        fen_row = ""
-        for cell in row:
-            if cell == ".." or cell == " ":
-                empty += 1
-            else:
-                if empty > 0:
-                    fen_row += str(empty)
-                    empty = 0
-                color = cell[0]
-                tipo = cell[1]
-                letra = mapeo[tipo].upper() if color == 'w' else mapeo[tipo].lower()
-                fen_row += letra
-        if empty > 0:
-            fen_row += str(empty)
-        fen_rows.append(fen_row)
-    
-    return "/".join(fen_rows) + f" {turno} KQkq - 0 1"
-
-def pensar_jugada_sunfish(matriz, es_blancas=True):
-    turno = "w" if es_blancas else "b"
-    posicion_fen = matriz_a_fen(matriz, turno)
-    
-    searcher = sunfish.Searcher()
-    pos = sunfish.parseFEN(posicion_fen)
-    
-    # Buscamos durante 2 segundos
-    move, score = searcher.search(pos, secs=2)
-    return sunfish.render(move)
+            self.log(f"Error: {str(e)}")
 
 if __name__ == "__main__":
-    print("¡Bienvenido al asistente de ajedrez con Sunfish!")
-    main()
+    app = ChessScraperApp()
+    app.mainloop()
